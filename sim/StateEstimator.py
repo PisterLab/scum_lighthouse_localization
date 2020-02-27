@@ -2,22 +2,6 @@ import numpy as np
 from py3dmath import Vec3, Rotation
 import matplotlib.pyplot as plt
 
-class Lighthouse:
-    def __init__(self,x,y,z,theta):
-        
-        self.pose = np.array([[1,0,0], 
-                     [0,np.cos(theta), np.sin(theta)],
-                     [0,-np.sin(theta), np.cos(theta)]])
-
-        self.translation = np.array([[1,0,0,-x],
-                                     [0,1,0,-y],
-                                     [0,0,1,-z]])
-        self.K = np.array([[1,0,0],
-                           [0,1,0],
-                           [0,0,1]])
-
-        self.P = np.matmul(np.matmul(self.K,self.pose),self.translation)
-
 class StateEstimator:
     def __init__(self,R_eo):
         self.R_eo = R_eo
@@ -95,10 +79,29 @@ class StateEstimator:
 
         else:
             return -1 
+
+    def plot_tracking(self,gnd_df,show = False):
+        plt.figure()
+        xyz_map = ['X','Y','Z']
+
+        for i in range(1,4):
+            plt.subplot(3,1,i)
+
+            plt.scatter(self.times[:],self.xm[i-1,0:len(self.times)],s = 1)
+            plt.plot(gnd_df['Time', 'Time'],gnd_df['Position',xyz_map[i-1]],linestyle = '--',color = 'orange')
+            #plt.xlim([65,120])
+            plt.ylabel(xyz_map[i-1] + ' (m)')
+            plt.legend(['Ground Truth','Lighthouse Tracking' ], loc = 'upper right')
+
+            plt.xlabel('Time (s)')
+
+        if show:
+            plt.show()        
+
 class Kalman(StateEstimator):
 
-    def __init__(self,Q,R,xm_0, Pm_0, time, R_eo,thresh):
-
+    def __init__(self,Q,R,xm_0, Pm_0, time, R_eo,thresh,t0):
+        self.time_errors = {'negative' : 0, 'oversized' : 0}
         self.Q = Q
         self.R = R 
         self.xm = np.zeros((6,len(time)))
@@ -125,53 +128,56 @@ class Kalman(StateEstimator):
         self.lh_index = 0
         self.max_position = 5
         self.thresh = thresh
-        self.times = []
+        self.times = [t0]
+        self.i = 1
 
-    def update(self,measurement,i):
+    def update(self,measurement):
+        print(measurement)
         if len(measurement)== 3 and np.linalg.norm(measurement) < 10:
             np.linalg.norm(measurement)
-            S = self.H @ self.Pp[:,:,i] @ self.H.T + self.R
-            K = self.Pp[:,:,i] @ self.H.T @ np.linalg.inv(S)    
+            S = self.H @ self.Pp[:,:,self.i] @ self.H.T + self.R
+            K = self.Pp[:,:,self.i] @ self.H.T @ np.linalg.inv(S)    
             #calculate measurement's mahalabonis distance from expected measurement distribution
-            euc_diff = np.linalg.inv(self.R_eo) @ measurement - self.H @ self.xp[:,i]
+            euc_diff = np.linalg.inv(self.R_eo) @ measurement - self.H @ self.xp[:,self.i]
             mahal = np.sqrt(euc_diff @ np.linalg.inv(S) @ euc_diff)
             self.mahals.append(mahal)
 
             if mahal < self.thresh:
-                self.xm[:,i] = self.xp[:,i] + K @ ( np.linalg.inv(self.R_eo) @ measurement - self.H @ self.xp[:,i]) 
-                print('xm',self.xm[:,i])
-                self.Pm[:,:,i] = (np.eye(6) - K @ self.H) @ self.Pp[:,:,i]
+                self.xm[:,self.i] = self.xp[:,self.i] + K @ ( np.linalg.inv(self.R_eo) @ measurement - self.H @ self.xp[:,self.i]) 
+                print('xm',self.xm[:,self.i])
+                self.Pm[:,:,self.i] = (np.eye(6) - K @ self.H) @ self.Pp[:,:,self.i]
             else:
-                self.Pm[:,:,i] = self.Pp[:,:,i]
-                self.xm[:,i] = self.xp[:,i]
+                self.Pm[:,:,self.i] = self.Pp[:,:,self.i]
+                self.xm[:,self.i] = self.xp[:,self.i]
         
         else:
-            self.Pm[:,:,i] = self.Pp[:,:,i]
-            self.xm[:,i] = self.xp[:,i]
+            self.Pm[:,:,self.i] = self.Pp[:,:,self.i]
+            self.xm[:,self.i] = self.xp[:,self.i]
 
+        self.i += 1
     def exp_meas(self):
         return self.H @ self.xp
 
     def meas_available(self,time,lh_traj):
 
-        while(lh_traj[self.lh_index,0] - time < 0):
-            self.lh_index += 1
+        lh_idx = np.searchsorted(lh_traj[:,0],time)
+        print(lh_idx,time)
 
-        if lh_traj[self.lh_index,0] - time <= 1/60:
-            self.lh_index += 1
-            return lh_traj[self.lh_index-1,1:]
-
+        if lh_idx < len(lh_traj):
+            return lh_traj[lh_idx,1:]
         else:
-            return [] 
+            return []
 
-    def predict(self,i,rotation,acceleration):
+        #acceleration in body coordinates
+    def predict(self,acceleration,omega = None,time= None):
         #rotation is optitrack to body
-        earth_accel =  np.linalg.inv(rotation.to_rotation_matrix()) @ acceleration
-
-        #print(earth_accel)
-        self.xp[:,i] = self.A@ self.xm[:,i-1] + np.array([0,0,0,earth_accel[0],earth_accel[1],earth_accel[2]])* 1/60 # xm[2,:]
-        self.Pp[:,:,i] = self.A @ self.Pm[:,:,i-1] @ self.A.T + self.Q
-
+        #earth_accel =  np.linalg.inv(rotation.to_rotation_matrix()) @ acceleration
+        earth_accel = acceleration
+        delta_t = time- self.times[-1]
+        self.times.append(time)
+        self.xp[:,self.i] = self.A@ self.xm[:,self.i-1] + np.array([0,0,0,earth_accel[0],earth_accel[1],earth_accel[2]])* delta_t
+        self.Pp[:,:,self.i] = self.A @ self.Pm[:,:,self.i-1] @ self.A.T + self.Q
+   
     def get_states(self):
         return self.xm
 
@@ -682,7 +688,7 @@ class UKF6DoF(StateEstimator):
 
             if self.lh_index >= len(lighthouse_df[column]):
                 #we've run out of lighthouse measurements, so return. 
-                
+
                 return -1
 
         if lighthouse_df[column].iloc[self.lh_index] - time <= 1/60:

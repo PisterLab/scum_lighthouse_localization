@@ -75,7 +75,7 @@ class Triangulator:
 
 #this function will align the lighthouse data to the vicon data. It will
 #return lighthouse data timestamp column that is temporally aligned with respect to the opititrack data
-def align_data(lh_data,take_name,optitrack_data = None):
+def align_data(data,take_name,optitrack_data = None):
 
     #time offsets (lh - optitrack)
     offsets = {'take1' : 284.6-85.4039,
@@ -85,7 +85,7 @@ def align_data(lh_data,take_name,optitrack_data = None):
                 'take5' : 116.671 - 84.6218,
                 'take3/20200226-004043' : 33.3 - 25.1}
 
-    aligned_timestamps = lh_data['timestamp_seconds'] - offsets[take_name] 
+    aligned_timestamps = data['timestamp_seconds'] - offsets[take_name] 
     return aligned_timestamps
 
 #loads lighthouse data. Will optionally align data to optitrack data; these offsets must be manually performed  
@@ -108,7 +108,19 @@ def load_lh(lighthouse_filename,take_name, align = False):
         lighthouse_df['timestamp_optitrack'] = lighthouse_df['timestamp_seconds']
 
     return lighthouse_df
+def load_imu(imu_filename,take_name,align = False):
+    #load imu data
+    with open(imu_filename) as file:
+        column_names = ['accel_x','accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z','timestamp_10.82']
+        imu_df = pd.read_csv(file, names = column_names)
+        imu_df['timestamp_seconds'] = imu_df['timestamp_10.82']/10.82e6
 
+    if align:
+        imu_df['timestamp_optitrack'] = align_data(imu_df,take_name)
+    else: 
+        imu_df['timestamp_optitrack'] = imu_df['timestamp_seconds']
+    return imu_df
+    
 #lh_data is the raw lighthouse dataframe
 def triangulate_scum(lh_data,lighthouse1, lighthouse2):
 
@@ -123,12 +135,6 @@ def triangulate_scum(lh_data,lighthouse1, lighthouse2):
     elA = [np.nan]
     elB = [np.nan]
 
-    #print(lh_data)
-    xcam1 = [np.nan]
-    ycam1 = [np.nan] 
-    xcam2 = [np.nan]
-    ycam2 = [np.nan]
-
     traj = []
     cam_points = []
     #iterate through every timestep
@@ -136,26 +142,38 @@ def triangulate_scum(lh_data,lighthouse1, lighthouse2):
 
         if abs(lh_data['azA'].iloc[i]) < 180:
             azA.append(lh_data['azA'].iloc[i] * np.pi/180.0)
-            xcam1.append( np.tan(azA[-1] - np.pi/2) )#focal distance of 1 (virtual)
     
         if abs(lh_data['azB'].iloc[i]) < 180:
             azB.append(lh_data['azB'].iloc[i] * np.pi/180.0)
-            xcam2.append( np.tan(azB[-1]- np.pi/2) )#focal distance of 1 (virtual)
 
         if abs(lh_data['elA'].iloc[i]) < 180:
             elA.append(lh_data['elA'].iloc[i] * np.pi/180.0)
-            ycam1.append(np.tan((elA[-1] - np.pi/2)))
 
         if abs(lh_data['elB'].iloc[i]) < 180:
             elB.append(lh_data['elB'].iloc[i] * np.pi/180.0)
-            ycam2.append( np.tan((elB[-1] - np.pi/2)))
 
         if not np.isnan([azA[-1],elA[-1],azB[-1],elB[-1]]).any():
             point = triangulator.triangulate(az1 = azA[-1], el1 = elA[-1], az2 = azB[-1], el2 = elB[-1])
             traj.append([lh_data['timestamp_optitrack'].iloc[i], point[0],point[1],point[2]])
-            cam_points.append([lh_data['timestamp_optitrack'].iloc[i], xcam1[-1],ycam1[-1],xcam2[-1],ycam2[-1]])
 
-    return np.squeeze(np.array(traj)), np.squeeze(np.array(cam_points))
+    return np.squeeze(np.array(traj))
+
+def plot_trajectories(trajectory,gnd_df,show = True):
+
+    plt.figure()
+    xyz_map = ['X','Y','Z']
+    for i in range(1,4):
+        plt.subplot(3,1,i)
+        plt.scatter(trajectory[:,0],trajectory[:,i],s = 1)
+        plt.plot(gnd_df['Time', 'Time'],gnd_df['Position',xyz_map[i-1]],linestyle = '--',color = 'orange')
+        #plt.xlim([65,120])
+        plt.ylabel(xyz_map[i-1] + ' (m)')
+        plt.legend(['Ground Truth','Lighthouse Tracking' ], loc = 'upper right')
+
+    plt.xlabel('Time (s)')
+
+    if show:
+        plt.show()
 
 #generates cam projection points for opencv lighthouse calibration
 def generate_cam_points(lh_data):
@@ -195,7 +213,7 @@ def generate_cam_points(lh_data):
 
 #take in azimuth and elevation in degrees 
 #this solves the equation X_gnd * P = Y_lh, solving for the P that minimizes error
-def calibrate(scum_gnd_df,initial_cam1, initial_cam2,lighthouse_cams):
+def calibrate(scum_gnd_df,initial_cam1, initial_cam2,lighthouse_cams, plot_results = False):
 
 
     cal_window_dict = {'take5': [2000, 3500]}
@@ -216,10 +234,11 @@ def calibrate(scum_gnd_df,initial_cam1, initial_cam2,lighthouse_cams):
     gnd_cam = []
     lh_cam_1 = [ list([row[1],row[2]]) for row in lighthouse_cams[100:400] ]
     lh_cam_1 = []
-    plt.figure()
-    plt.plot(lighthouse_cams[:,1:5])
-    plt.title('Lighthouse Camera Points')
-    #print(lh_cam_1)
+    if plot_results:
+        plt.figure()
+        plt.plot(lighthouse_cams[:,1:5])
+        plt.title('Lighthouse Camera Points')
+
     for i in range(begin,end):
         current_point_time = lighthouse_cams[i,0]
         gnd_index = scum_gnd_df.index.get_loc(current_point_time,method = 'nearest')
@@ -276,13 +295,15 @@ def calibrate(scum_gnd_df,initial_cam1, initial_cam2,lighthouse_cams):
     print(rot)
     #print(np.linalg.inv(rot) @ tvec)
     print(tvec)
-    plt.figure()
-    plt.subplot(2,1,1)
-    plt.plot(gnd_cam)
-    plt.title('Ground Cam')
-    plt.subplot(2,1,2)
-    plt.plot(lh_cam_1)
-    plt.title('Lighthouse Cam 1')
+
+    if plot_results:
+        plt.figure()
+        plt.subplot(2,1,1)
+        plt.plot(gnd_cam)
+        plt.title('Ground Cam')
+        plt.subplot(2,1,2)
+        plt.plot(lh_cam_1)
+        plt.title('Lighthouse Cam 1')
 
     lh1_obj = Lighthouse()
     lh1_obj.setOpenCVParams(tvec = tvec,rvec = rvec,K = K)
@@ -298,18 +319,19 @@ def calibrate(scum_gnd_df,initial_cam1, initial_cam2,lighthouse_cams):
     rot, rando = opencv.Rodrigues(rvec)
     xyz_camera = rot @ (np.array(gnd_cam).T + np.linalg.inv(rot) @ lh1_obj.cvTvec)
 
-    plt.figure()
-    plt.subplot(2,1,1)
-    #plt.plot(xyz_camera[0,:]/xyz_camera[2,:])
-    plt.plot(np.array(lh_cam_1)[:,0])
-    plt.title("Lighthouse 1 projecttion check")
-    plt.plot(cvproj1[:,0])
-    plt.legend(['Lighthouse','OpenCV Projectect Truth'])
+    if plot_results:
+        plt.figure()
+        plt.subplot(2,1,1)
+        #plt.plot(xyz_camera[0,:]/xyz_camera[2,:])
+        plt.plot(np.array(lh_cam_1)[:,0])
+        plt.title("Lighthouse 1 projecttion check")
+        plt.plot(cvproj1[:,0])
+        plt.legend(['Lighthouse','OpenCV Projectect Truth'])
 
-    plt.subplot(2,1,2)
-    plt.plot(np.array(lh_cam_1)[:,1])
-    plt.plot(cvproj1[:,1])
-    plt.legend(['Lighthouse','OpenCV Projectect Truth'])
+        plt.subplot(2,1,2)
+        plt.plot(np.array(lh_cam_1)[:,1])
+        plt.plot(cvproj1[:,1])
+        plt.legend(['Lighthouse','OpenCV Projectect Truth'])
 
 
 
@@ -370,11 +392,13 @@ def calibrate(scum_gnd_df,initial_cam1, initial_cam2,lighthouse_cams):
     rot, jacobian = opencv.Rodrigues(rvec)
     print(rot)
     print(np.linalg.inv(rot) @ tvec)
-    plt.figure()
-    plt.subplot(2,1,1)
-    plt.plot(gnd_cam)
-    plt.subplot(2,1,2)
-    plt.plot(lh_cam_2)
+
+    if plot_results:
+        plt.figure()
+        plt.subplot(2,1,1)
+        plt.plot(gnd_cam)
+        plt.subplot(2,1,2)
+        plt.plot(lh_cam_2)
 
 
     lh2_obj = Lighthouse()
@@ -386,17 +410,18 @@ def calibrate(scum_gnd_df,initial_cam1, initial_cam2,lighthouse_cams):
 
     cvproj2 = np.squeeze(np.array(imagePoints))
 
-    plt.figure()
-    plt.subplot(2,1,1)
-    plt.plot(np.array(lh_cam_2)[:,0])
-    plt.title("Lighthouse 2 projection check")
-    plt.plot(cvproj2[:,0])
-    plt.legend(['Lighthouse','OpenCV Projectect Truth'])
+    if plot_results:
+        plt.figure()
+        plt.subplot(2,1,1)
+        plt.plot(np.array(lh_cam_2)[:,0])
+        plt.title("Lighthouse 2 projection check")
+        plt.plot(cvproj2[:,0])
+        plt.legend(['Lighthouse','OpenCV Projectect Truth'])
 
-    plt.subplot(2,1,2)
-    plt.plot(np.array(lh_cam_2)[:,1])
-    plt.plot(cvproj2[:,1])
-    plt.legend(['Lighthouse','OpenCV Projectect Truth'])
+        plt.subplot(2,1,2)
+        plt.plot(np.array(lh_cam_2)[:,1])
+        plt.plot(cvproj2[:,1])
+        plt.legend(['Lighthouse','OpenCV Projectect Truth'])
 
 
 
